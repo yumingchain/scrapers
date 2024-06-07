@@ -1,0 +1,26 @@
+{
+    "python.envFile": "${workspaceFolder}/.env",
+    "terminal.integrated.profiles.osx": {
+        "zsh": {
+            "path": "zsh",
+            "args": [
+                "-c",
+                "export `cat .env`; $SHELL"
+            ]
+        }
+    },
+    "python.formatting.provider": "black",
+    "python.testing.pytestArgs": [
+        // "tests"
+        // "-k", "test_*"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.languageServer": "Pylance",
+    "python.analysis.typeCheckingMode": "basic",
+    "python.linting.flake8Enabled": true,
+    "python.linting.enabled": true,
+    "cSpell.words": [
+        "diskcache"
+    ]
+}

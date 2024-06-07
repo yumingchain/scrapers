@@ -1,0 +1,25 @@
+# Web framework
+pydantic[dotenv]>2.0
+pydantic_settings
+requests>=2.26.0
+# Runner
+typer>=0.4.0
+rich>=12.5.1
+# Datascience
+pandas>=1.3.5
+gcloud>=0.18.3
+google-cloud-vision>=2.6.3
+commonregex
+beautifulsoup4>=4.10.0
+pdf2image>=1.16.0
+docxtpl>=0.15.2ù
+unidecode>=1.3.4
+pillow
+pypdf
+langchain
+openai
+playwright
+playwright_stealth
+
+2captcha-python
+pytest-playwright
