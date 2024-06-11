@@ -146,7 +146,7 @@ class CaseScraper:
         await self.playwright.stop()
         print("Browser closed.")
 
-async def run()
+async def run():
     scraper = CaseScraper()
     await scraper.init_browser()
     await scraper.get_court()
