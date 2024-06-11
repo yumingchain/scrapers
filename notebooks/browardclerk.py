@@ -26,7 +26,7 @@ def split_birth_date(birth_date_str):
     return {'birth_date': birth_date, 'year_of_birth': year_of_birth}
 
 async def run():
-    try: 
+    try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False, slow_mo=50)
             page = await browser.new_page()
