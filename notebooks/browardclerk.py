@@ -1,103 +1,160 @@
-import asyncio
-from playwright.async_api import async_playwright
+import sys
+import os
+import re
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 
-URL = 'https://www.browardclerk.org/Web2'
-CASE_NUMBER = '24001500TI10A'
-DATE_FORMAT = '%m/%d/%Y'
+from playwright.async_api import async_playwright, TimeoutError
+from rich.console import Console
+from dotenv import load_dotenv
+from twocaptcha import TwoCaptcha
 
-class Case:
-    def __init__(self, case_data):
-        self.data = case_data
+sys.path.append("..")
 
-class Lead:
-    def __init__(self, lead_data):
-        self.data = lead_data
+from models.cases import Case
+from models.leads import Lead
+from models.scraper import ScraperBase
 
-class CaseScraper:
-    def __init__(self):
-        self.browser = None
-        self.page = None
+load_dotenv()
+TWOCAPTCHA_API_KEY = os.getenv('TWOCAPTCHA_API_KEY')
+console = Console()
 
-    async def init_browser(self):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=False, slow_mo=50)
-        self.page = await self.browser.new_page()
-        await self.page.goto(URL, timeout=60000)
-        print("Webpage loaded.")
 
-    async def get_court(self):
-        await self.page.click('#myTabStandard > div > div > ul > li:nth-child(3) > a')
-        print("Clicked on button.")
+class BrowardScraper(ScraperBase):
+    solver = TwoCaptcha(TWOCAPTCHA_API_KEY)
 
-    async def get_case(self):
-        await self.page.click('#CaseNumber')
-        print("Clicked on textbox.")
-        await self.page.fill('#CaseNumber', CASE_NUMBER)
-        print("Filled textbox.")
-        print("Please complete the CAPTCHA verification.")
-        await self.page.wait_for_timeout(30000)
-        print("Resuming Operation...")
-        await self.page.click('#CaseNumberSearchResults')
-        print("Clicked on the search button.")
-        await self.page.click('#SearchResultsGrid > div.k-grid-content > table > tbody > tr > td:nth-child(1) > div > a')
-        print("Clicked on the case number.")
+    def split_full_name(self, name):
+        parts = re.split(r'[\s,\-\.]+', name)
+        first_name = middle_name = last_name = ''
 
-    async def get_court_detail(self):
-        case_id = await self.page.inner_text('#liCN')
-        print(f"case_id: {case_id}")
+        if len(parts) > 2:
+            first_name = parts[0]
+            middle_name = ' '.join(parts[1:-1])
+            last_name = parts[-1]
+        elif len(parts) == 2:
+            first_name, last_name = parts
+        elif len(parts) == 1:
+            first_name = parts[0]
 
-        court_desc = await self.page.inner_text('#tblOtherDocs > tbody > tr > td:nth-child(2)')
-        print(f"court_desc: {court_desc}")
+        return first_name, middle_name, last_name
 
-        address = await self.page.inner_text('#PartyDetailsRow > tr:nth-child(1) > td:nth-child(3)')
-        print(f"address: {address}")
+    async def get_site_key(self):
+        iframe = await self.page.query_selector('iframe[title="reCAPTCHA"]')
+        iframe_src = await iframe.get_attribute('src')
+        parsed_url = urlparse(iframe_src)
+        query_params = parse_qs(parsed_url.query)
+        site_key = query_params.get('k', [None])[0]
+        return site_key
 
-        charge_str = await self.page.inner_text('#tblCharges > tbody > tr > td:nth-child(2)')
-        charges = self.convert_charge(charge_str)
-        print(f"charge: {charges}")
+    async def init_browser(self, case_id):
+        console.log("Initiating Browser...")
+        pw = await async_playwright().start()
+        self.browser = await pw.chromium.launch(headless=False, slow_mo=50)
+        context = await self.browser.new_context()
+        self.page = await context.new_page()
+        self.url = "https://www.browardclerk.org/Web2"
+        await self.page.goto(self.url)
+        await self.page.click("a:has-text('Case Number')")
+        case_number_element = await self.page.query_selector('#CaseNumber')
+        await case_number_element.fill(case_id)
 
-        filing_date_str = await self.page.inner_text('#liCRFilingDate')
-        filing_date = datetime.strptime(filing_date_str, DATE_FORMAT)
-        print(f"filing date: {filing_date}")
+        recaptcha_element = await self.page.query_selector('#RecaptchaField3')
+        if recaptcha_element:
+            site_key = await self.get_site_key()
+            response = self.solver.recaptcha(sitekey=site_key, url=self.url)
+            code = response['code']
+            response_textarea = await recaptcha_element.query_selector('#g-recaptcha-response-2')
+            if response_textarea:
+                await response_textarea.evaluate('el => el.value = "{}"'.format(code))
+            submit_button = await self.page.query_selector('#CaseNumberSearchResults')
+            if submit_button:
+                await submit_button.click()
 
-        offence_date_str = await self.page.inner_text('#tblCharges > tbody > tr > td:nth-child(1)')
-        offence_date = datetime.strptime(offence_date_str, DATE_FORMAT)
-        print(f"offence date: {offence_date}")
+    async def detail_search(self, case_id):
+        await self.page.wait_for_selector(f'a:has-text("{case_id}")')
+        await self.page.click(f'a:has-text("{case_id}")')
+        await self.page.wait_for_load_state('load')
 
-        full_name = await self.page.inner_text('#PartyDetailsRow > tr:nth-child(1) > td:nth-child(2) > b:nth-child(1)')
-        first_name, middle_name, last_name = self.split_name(full_name)
-        print(f"first_name: {first_name}")
-        print(f"middle_name: {middle_name}")
-        print(f"last_name: {last_name}")
+        filing_date_element = await self.page.query_selector('span:has-text("Filing Date:") + span')
+        filing_date = await filing_date_element.inner_text()
+        filing_date = datetime.strptime(filing_date, "%m/%d/%Y")
 
-        gender = await self.page.evaluate('''() => {
-            let xpath = '//*[@id="PartyDetailsRow"]/tr[1]/td[2]/text()[1]';
-            let iterator = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null );
-            let textNode = iterator.iterateNext();
-            return textNode ? textNode.textContent : '';
+        name_element = await self.page.query_selector('td b')
+        name = await name_element.inner_text()
+        name = name.strip()
+        first_name, middle_name, last_name = self.split_full_name(name)
+
+        gender_element = await self.page.query_selector('td >> text="Gender:"')
+        gender = await gender_element.evaluate('(element) => element.nextSibling.nodeValue.trim()')
+
+        dob_element = await self.page.query_selector('td >> text="DOB:"')
+        dob = await dob_element.evaluate('(element) => element.nextSibling.nodeValue.trim()')
+        date_components = dob.split("/")
+        birth_date = f"{date_components[0]}/{date_components[1]}"
+        year_of_birth = date_components[2]
+
+        address = await self.page.evaluate('''() => {
+            const defendantCell = Array.from(document.querySelectorAll('td')).find(td => td.textContent.trim() === 'Defendant');
+            if (defendantCell) {
+                const row = defendantCell.closest('tr');
+                const bsfCell = row.querySelectorAll('td')[2];
+                if (bsfCell) {
+                    return bsfCell.textContent.trim();
+                }
+            }
+            return null;
         }''')
-        print(f"gender: {gender}")
 
-        birth_date_str = await self.page.evaluate('''() => {
-            let xpath = '//*[@id="PartyDetailsRow"]/tr[1]/td[2]/text()[4]';
-            let iterator = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null );
-            let textNode = iterator.iterateNext();
-            return textNode ? textNode.textContent : '';
+        offense_date = await self.page.evaluate('''() => {
+            const rows = Array.from(document.querySelectorAll('tr'));
+            for (let row of rows) {
+                if (row.innerText.includes('Date Filed:')) {
+                    const cells = Array.from(row.querySelectorAll('td'));
+                    for (let cell of cells) {
+                        if (cell.getAttribute('width') === '100px') {
+                            return cell.textContent.trim();
+                        }
+                    }
+                }
+            }
+            return null;
         }''')
-        birth_date = self.split_birth_date(birth_date_str)['birth_date']
-        year_of_birth = self.split_birth_date(birth_date_str)['year_of_birth']
-        print(f"birth_date: {birth_date}")
-        print(f"year_of_birth: {year_of_birth}")
+        offense_date = datetime.strptime(offense_date, "%m/%d/%Y")
 
-        # Create case_dict
+        charges = await self.page.evaluate('''() => {
+            const cells = Array.from(document.querySelectorAll('td'));
+            for (let cell of cells) {
+                if (cell.innerText.includes('Date Filed:')) {
+                    const chargeDetailElement = cell.closest('td').querySelector('b');
+                    if (chargeDetailElement) {
+                        return chargeDetailElement.innerText.trim();
+                    }
+                }
+            }
+            return null;
+        }''')
+        charges = [{"offense": charges}]
+
+        court_id = await self.page.evaluate('''() => {
+            const tdElements = Array.from(document.querySelectorAll('td'));
+            for (let td of tdElements) {
+                if (td.innerText.includes('Citation Number:')) {
+                    const match = td.innerText.match(/Citation Number: (\w+)/);
+                    if (match) {
+                        return match[1];
+                    }
+                }
+            }
+            return null;
+        }''')
+
         case_dict = {
             "case_id": case_id,
-            "court_desc": court_desc,
+            "court_id": court_id,
             "address": address,
             "charges": charges,
             "filing_date": filing_date,
-            "offence_date": offence_date,
+            "offense_date": offense_date,
             "first_name": first_name,
             "middle_name": middle_name,
             "last_name": last_name,
@@ -105,53 +162,25 @@ class CaseScraper:
             "birth_date": birth_date,
             "year_of_birth": year_of_birth,
         }
+        return case_dict
 
-        # Instantiate Case and Lead objects
-        case = Case(case_dict)
-        lead = Lead(case_dict)
+    async def scrape(self, search_parameters):
+        case_id = search_parameters['case_id']
+        await self.init_browser(case_id)
+        case_dict = await self.detail_search(case_id)
+        print(case_dict)
 
-        # Insert case and lead
+        case = Case(**case_dict)
+        lead = Lead(**case_dict)
         self.insert_case(case)
         self.insert_lead(lead)
 
-    def convert_charge(self, charge_str):
-        """Convert the charge string into a list of dictionaries."""
-        return [{'charge': charge_str}]
-
-    def split_name(self, full_name):
-        """Split the full name into a list of names."""
-        names = full_name.split()
-        last_name = names[0].replace(',', '')
-        first_name = names[1]
-        middle_name = names[2] if len(names) > 2 else None
-        return first_name, middle_name, last_name
-
-    def split_birth_date(self, birth_date_str):
-        """Split the birth date into a list of date components."""
-        date_components = birth_date_str.split('/')
-        birth_date = '/'.join(date_components[:2])
-        year_of_birth = date_components[2]
-        return {'birth_date': birth_date, 'year_of_birth': year_of_birth}
-
-    def insert_case(self, case):
-        # Placeholder for inserting case into a database or processing it further
-        print(f"Inserted case: {case.data}")
-
-    def insert_lead(self, lead):
-        # Placeholder for inserting lead into a database or processing it further
-        print(f"Inserted lead: {lead.data}")
-
-    async def close_browser(self):
         await self.browser.close()
-        await self.playwright.stop()
-        print("Browser closed.")
+
 
 async def run():
-    scraper = CaseScraper()
-    await scraper.init_browser()
-    await scraper.get_court()
-    await scraper.get_case()
-    await scraper.get_court_detail()
-    await scraper.close_browser()
+    scraper = BrowardScraper()
+    search_parameters = {'case_id': '24001500TI10A'}
+    await scraper.scrape(search_parameters)
 
 asyncio.run(run())
