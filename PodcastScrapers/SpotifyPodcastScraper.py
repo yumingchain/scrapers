@@ -38,7 +38,7 @@ def search_for_show(token, show_name, market="US"):
     offset = 0
     limit = 50  # Spotify's maximum limit per request
     
-    while True:
+    for offset in range(0, 100, 50):  # Fetch in two batches (0-49, 50-99)
         query = f"?q={show_name}&type=show&market={market}&limit={limit}&offset={offset}"
         query_url = url + query
         response = get(query_url, headers=headers)
@@ -51,8 +51,6 @@ def search_for_show(token, show_name, market="US"):
         
         if len(json_response["shows"]["items"]) < limit:
             break
-        
-        offset += limit  # Move to the next batch
 
     return shows if shows else None
 
@@ -81,7 +79,7 @@ def get_all_episodes(token, show_id):
     return episodes
 
 token = get_token()
-results = search_for_show(token, "The Joe Rogan Experience")
+results = search_for_show(token, "podcast")
 
 if results:
     for idx, show in enumerate(results):
